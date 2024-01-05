@@ -16,6 +16,77 @@ visibility([
     "//tests/bzlmod/...",
 ])
 
+def _validate_go_version(path, state, tokens, line_no):
+    if len(tokens) == 1:
+        fail("{}:{}: expected another token after 'go'".format(path, line_no))
+    if state["go"] != None:
+        fail("{}:{}: unexpected second 'go' directive".format(path, line_no))
+    if len(tokens) > 2:
+        fail("{}:{}: unexpected token '{}' after '{}'".format(path, line_no, tokens[2], tokens[1]))
+
+# TODO: megahack    
+def _use_value_token_to_label(workspace_name, token):
+    if token.startswith("."):
+        token = token[1:]
+    if token.endswith("/"):
+        token = token[:-1]
+    return Label("@@" + workspace_name + "/" + token + ":go.mod")
+
+# TODO: megahack
+# TODO: tests
+def parse_go_work(content, go_work_label):
+    # see: https://go.dev/ref/mod#go-work-file
+
+    # Valid directive values understood by this parser never contain tabs or
+    # carriage returns, so we can simplify the parsing below by canonicalizing
+    # whitespace upfront.
+    content = content.replace("\t", " ").replace("\r", " ")
+
+    state = {
+        "go": None,
+        "use": [],
+        "replace": {},
+    }
+
+    current_directive = None
+    for line_no, line in enumerate(content.splitlines() ,1):
+        tokens, _ = _tokenize_line(line, go_work_label.name, line_no)
+
+        if not tokens:
+            continue
+
+        if current_directive:
+            if tokens[0] == ")":
+                current_directive = None
+            elif current_directive == "use":
+                state["use"].append(tokens[0])
+            else:
+                fail("{}:{}: unexpected directive '{}'".format(go_work_label.name, line_no, current_directive))
+        else:
+            if tokens[0] == "go":
+                _validate_go_version(go_work_label.name, state, tokens, line_no)
+                go = tokens[1]
+            elif tokens[0] == "replace":
+                fail("{}:{}: 'replace' directive not yet supported".format(go_work_label.name, line_no))
+            elif tokens[0] == "use":
+                if len(tokens) != 2:
+                    fail("{}:{}: expected path or block in 'use' directive".format(go_work_label.name, line_no))
+                elif tokens[1] == "(":
+                    current_directive = tokens[0]
+                    continue
+                else:
+                    state["use"].append(tokens[1])
+            else:
+                fail("{}:{}: unexpected directive '{}'".format(go_work_label.name, line_no, tokens[0])) 
+
+    major, minor = go.split(".")[:2]
+
+    return struct(
+        go = (int(major), int(minor)),
+        go_mods = [_use_value_token_to_label(go_work_label.workspace_name, use) for use in state["use"]],
+        replace_map = state["replace"],
+    )
+
 def deps_from_go_mod(module_ctx, go_mod_label):
     """Loads the entries from a go.mod file.
 
@@ -79,13 +150,8 @@ def parse_go_mod(content, path):
             # The 'go' directive only has a single-line form and is thus parsed
             # here rather than in _parse_directive.
             if tokens[0] == "go":
-                if len(tokens) == 1:
-                    fail("{}:{}: expected another token after 'go'".format(path, line_no))
-                if state["go"] != None:
-                    fail("{}:{}: unexpected second 'go' directive".format(path, line_no))
+                _validate_go_version(path, state, tokens, line_no)
                 state["go"] = tokens[1]
-                if len(tokens) > 2:
-                    fail("{}:{}: unexpected token '{}' after '{}'".format(path, line_no, tokens[2], tokens[1]))
 
             if tokens[1] == "(":
                 current_directive = tokens[0]

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 load("//internal:go_repository.bzl", "go_repository")
-load(":go_mod.bzl", "deps_from_go_mod", "sums_from_go_mod")
+load(":go_mod.bzl", "deps_from_go_mod", "sums_from_go_mod", "parse_go_work")
 load(
     ":default_gazelle_overrides.bzl",
     "DEFAULT_BUILD_EXTRA_ARGS_BY_PATH",
@@ -43,6 +43,16 @@ https://github.com/bazelbuild/bazel-gazelle/issues/new or submit a PR adding \
 the required directives to the "default_gazelle_overrides.bzl" file at \
 https://github.com/bazelbuild/bazel-gazelle/tree/master/internal/bzlmod/default_gazelle_overrides.bzl.
 """
+
+# TODO: megahack    
+def from_file_tags_from_go_work(module_ctx, go_work_label):
+    """Loads deps from a go.work file"""
+    go_work_path = module_ctx.path(go_work_label)
+    go_work_content = module_ctx.read(go_work_path)
+    go_work = parse_go_work(go_work_content, go_work_label)
+
+    # struct( go_mod = Label("@@//hello:go.mod"), _is_dev_dependency = False)
+    return [struct( go_mod = go_mod, _is_dev_dependency = False) for go_mod in go_work.go_mods]
 
 def _fail_on_non_root_overrides(module_ctx, module, tag_class):
     if module.is_root:
@@ -251,8 +261,20 @@ def _go_deps_impl(module_ctx):
                     ", ".join([str(tag.go_mod) for tag in module.tags.from_file]),
                 ),
             )
+
         additional_module_tags = []
+        from_file_tags = []
+
         for from_file_tag in module.tags.from_file:
+            if from_file_tag.go_mod:
+                from_file_tags.append(from_file_tag)
+            elif from_file_tag.go_work:
+                # TODO: megahack
+                from_file_tags = from_file_tags + from_file_tags_from_go_work(module_ctx, from_file_tag.go_work)
+            else:
+                fail("Either \"go_mod\" or \"go_work\" must be specified in \"go_deps.from_file\" tags.")
+
+        for from_file_tag in from_file_tags:
             module_path, module_tags_from_go_mod, go_mod_replace_map = deps_from_go_mod(module_ctx, from_file_tag.go_mod)
             is_dev_dependency = _is_dev_dependency(module_ctx, from_file_tag)
             additional_module_tags += [
@@ -305,11 +327,10 @@ def _go_deps_impl(module_ctx):
         # resolving them to higher versions, but only compatible ones.
         paths = {}
         for module_tag in module.tags.module + additional_module_tags:
-            if module_tag.path in paths:
-                fail("Duplicate Go module path \"{}\" in module \"{}\".".format(module_tag.path, module.name))
+            if not module_tag.path in paths:
+                paths[module_tag.path] = None
             if module_tag.path in bazel_deps:
                 continue
-            paths[module_tag.path] = None
             raw_version = _canonicalize_raw_version(module_tag.version)
 
             # For modules imported from a go.sum, we know which ones are direct
@@ -325,6 +346,17 @@ def _go_deps_impl(module_ctx):
                     root_module_direct_deps[_repo_name(module_tag.path)] = None
 
             version = semver.to_comparable(raw_version)
+            previous_version = paths[module_tag.path]
+
+            # TODO: megahack
+            # since may have duplicate versions, rather then selecting the first we see, we should select the latest
+            if previous_version and version <= previous_version:
+                # prefer the existing version
+                continue
+            else:
+                # prefer the new version as it is greater than the existing version
+                paths[module_tag.path] = version
+
             if module_tag.path not in module_resolutions or version > module_resolutions[module_tag.path].version:
                 module_resolutions[module_tag.path] = struct(
                     repo_name = _repo_name(module_tag.path),
@@ -500,7 +532,8 @@ _config_tag = tag_class(
 
 _from_file_tag = tag_class(
     attrs = {
-        "go_mod": attr.label(mandatory = True),
+        "go_mod": attr.label(mandatory = False),
+        "go_work": attr.label(mandatory = False),
     },
 )
 

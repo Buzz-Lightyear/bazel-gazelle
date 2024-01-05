@@ -67,6 +67,10 @@ def _fail_on_non_root_overrides(module_ctx, module, tag_class):
             module_name = module.name,
         ))
 
+def _humanize_comparable_version(version):
+    segments = [str(segment[1]) for segment in version[0]]
+    return ".".join(segments)
+
 def _fail_on_duplicate_overrides(path, module_name, overrides):
     if path in overrides:
         fail("Multiple overrides defined for Go module path \"{}\" in module \"{}\".".format(path, module_name))
@@ -356,12 +360,16 @@ def _go_deps_impl(module_ctx):
             previous_version = paths[module_tag.path]
 
             # TODO: megahack
-            # since may have duplicate versions, rather then selecting the first we see, we should select the latest
+            # since may have duplicate versions, rather then selecting the first we see, we select the latest
+            # this hack is exploratory and should be considered temporary
+            if previous_version and not version == previous_version:
+                print("[WIP Warning] multiple differing versions of {} found: {} vs {}".format(module_tag.path, _humanize_comparable_version(version), _humanize_comparable_version(previous_version)))
+
             if previous_version and version <= previous_version:
                 # prefer the existing version
                 continue
             else:
-                # prefer the new version as it is greater than the existing version
+                # prefer the new later version
                 paths[module_tag.path] = version
 
             if module_tag.path not in module_resolutions or version > module_resolutions[module_tag.path].version:

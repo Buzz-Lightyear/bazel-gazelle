@@ -25,7 +25,7 @@ def _validate_go_version(path, state, tokens, line_no):
         fail("{}:{}: unexpected token '{}' after '{}'".format(path, line_no, tokens[2], tokens[1]))
 
 # TODO: megahack    
-def _use_value_token_to_label(workspace_name, token):
+def _use_spec_to_label(workspace_name, token):
     if token.startswith("."):
         token = token[1:]
     if token.endswith("/"):
@@ -60,6 +60,8 @@ def parse_go_work(content, go_work_label):
                 current_directive = None
             elif current_directive == "use":
                 state["use"].append(tokens[0])
+            elif current_directive == "replace":
+                _parse_replace_directive(state, tokens, go_work_label.name, line_no)
             else:
                 fail("{}:{}: unexpected directive '{}'".format(go_work_label.name, line_no, current_directive))
         else:
@@ -67,7 +69,11 @@ def parse_go_work(content, go_work_label):
                 _validate_go_version(go_work_label.name, state, tokens, line_no)
                 go = tokens[1]
             elif tokens[0] == "replace":
-                fail("{}:{}: 'replace' directive not yet supported".format(go_work_label.name, line_no))
+                if tokens[1] == "(":
+                    current_directive = tokens[0]
+                    continue
+                else:
+                    _parse_replace_directive(state, tokens[1:], go_work_label.name, line_no)
             elif tokens[0] == "use":
                 if len(tokens) != 2:
                     fail("{}:{}: expected path or block in 'use' directive".format(go_work_label.name, line_no))
@@ -81,10 +87,16 @@ def parse_go_work(content, go_work_label):
 
     major, minor = go.split(".")[:2]
 
+    go_mods = [_use_spec_to_label(go_work_label.workspace_name, use) for use in state["use"]]
+    from_file_tags = [struct( go_mod = go_mod, _is_dev_dependency = False) for go_mod in go_mods]
+
+    module_tags = [ struct(version = mod.version, path = mod.to_path, indirect = False) for mod in state["replace"].values()]
+    
     return struct(
         go = (int(major), int(minor)),
-        go_mods = [_use_value_token_to_label(go_work_label.workspace_name, use) for use in state["use"]],
+        from_file_tags = from_file_tags,
         replace_map = state["replace"],
+        module_tags = module_tags,
     )
 
 def deps_from_go_mod(module_ctx, go_mod_label):
@@ -205,37 +217,38 @@ def _parse_directive(state, directive, tokens, comment, path, line_no):
             indirect = comment == "indirect",
         ))
     elif directive == "replace":
-        # A replace directive might use a local file path beginning with ./ or ../
-        # These are not supported with gazelle~go_deps.
-        if (len(tokens) == 3 and tokens[2][0] == ".") or (len(tokens) > 3 and tokens[3][0] == "."):
-            fail("{}:{}: local file path not supported in replace directive: '{}'".format(path, line_no, tokens[2]))
-
-        # replacements key off of the from_path
-        from_path = tokens[0]
-
-        # pattern: replace from_path => to_path to_version
-        if len(tokens) == 4 and tokens[1] == "=>":
-            state["replace"][from_path] = struct(
-                from_version = None,
-                to_path = tokens[2],
-                version = _canonicalize_raw_version(tokens[3]),
-            )
-        # pattern: replace from_path from_version => to_path to_version
-        elif len(tokens) == 5 and tokens[2] == "=>":
-            state["replace"][from_path] = struct(
-                from_version = _canonicalize_raw_version(tokens[1]),
-                to_path = tokens[3],
-                version = _canonicalize_raw_version(tokens[4]),
-            )
-        else:
-            fail(
-                "{}:{}: replace directive must follow pattern: ".format(path, line_no) + 
-                "'replace from_path from_version => to_path to_version' or " +
-                "'replace from_path => to_path to_version'"
-            )
+       _parse_replace_directive(state, tokens, path, line_no)
 
     # TODO: Handle exclude.
+def _parse_replace_directive(state, tokens, path, line_no):
+    # A replace directive might use a local file path beginning with ./ or ../
+    # These are not supported with gazelle~go_deps.
+    if (len(tokens) == 3 and tokens[2][0] == ".") or (len(tokens) > 3 and tokens[3][0] == "."):
+        fail("{}:{}: local file path not supported in replace directive: '{}'".format(path, line_no, tokens[2]))
 
+    # replacements key off of the from_path
+    from_path = tokens[0]
+
+    # pattern: replace from_path => to_path to_version
+    if len(tokens) == 4 and tokens[1] == "=>":
+        state["replace"][from_path] = struct(
+            from_version = None,
+            to_path = tokens[2],
+            version = _canonicalize_raw_version(tokens[3]),
+        )
+    # pattern: replace from_path from_version => to_path to_version
+    elif len(tokens) == 5 and tokens[2] == "=>":
+        state["replace"][from_path] = struct(
+            from_version = _canonicalize_raw_version(tokens[1]),
+            to_path = tokens[3],
+            version = _canonicalize_raw_version(tokens[4]),
+        )
+    else:
+        fail(
+            "{}:{}: replace directive must follow pattern: ".format(path, line_no) + 
+            "'replace from_path from_version => to_path to_version' or " +
+            "'replace from_path => to_path to_version'"
+        )
 def _tokenize_line(line, path, line_no):
     tokens = []
     r = line
@@ -306,16 +319,37 @@ def sums_from_go_mod(module_ctx, go_mod_label):
     """
     _check_go_mod_name(go_mod_label.name)
 
-    # We go through a Label so that the module extension is restarted if go.sum
+    return parse_sumfile(module_ctx, go_mod_label, "go.sum")
+
+def sums_from_go_work(module_ctx, go_work_label):
+    """Loads the entries from a go.work.sum file given a go.workLabel.
+
+    Args:
+        module_ctx: a https://bazel.build/rules/lib/module_ctx object
+            passed from the MODULE.bazel call.
+        go_work_label: a Label for a `go.work` file. This label is used
+            to find the associated `go.work.sum` file.
+
+    Returns:
+        A Dict[(string, string) -> (string)] is retruned where each entry
+        is defined by a Go Module's sum:
+            (path, version) -> (sum)
+    """
+    _check_go_work_name(go_work_label.name)
+
+    return parse_sumfile(module_ctx, go_work_label, "go.work.sum")
+
+def parse_sumfile(module_ctx, label, somefile):
+    # We go through a Label so that the module extension is restarted if the sumfile
     # changes. We have to use a canonical label as we may not have visibility
-    # into the module that provides the go.sum.
-    go_sum_label = Label("@@{}//{}:{}".format(
-        go_mod_label.workspace_name,
-        go_mod_label.package,
-        "go.sum",
+    # into the module that provides the sumfile
+    sum_label = Label("@@{}//{}:{}".format(
+        label.workspace_name,
+        label.package,
+        somefile,
     ))
-    go_sum_content = module_ctx.read(go_sum_label)
-    return parse_go_sum(go_sum_content)
+    sum_content = module_ctx.read(sum_label)
+    return parse_go_sum(sum_content)
 
 def parse_go_sum(content):
     hashes = {}
@@ -329,6 +363,10 @@ def parse_go_sum(content):
 def _check_go_mod_name(name):
     if name != "go.mod":
         fail("go_deps.from_file requires a 'go.mod' file, not '{}'".format(name))
+
+def _check_go_work_name(name):
+    if name != "go.work":
+        fail("go_deps.from_file requires a 'go.work' file, not '{}'".format(name))
 
 def _canonicalize_raw_version(raw_version):
     if raw_version.startswith("v"):

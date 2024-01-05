@@ -13,7 +13,7 @@
 # limitations under the License.
 
 load("//internal:go_repository.bzl", "go_repository")
-load(":go_mod.bzl", "deps_from_go_mod", "sums_from_go_mod", "parse_go_work")
+load(":go_mod.bzl", "deps_from_go_mod", "sums_from_go_mod", "sums_from_go_work", "parse_go_work")
 load(
     ":default_gazelle_overrides.bzl",
     "DEFAULT_BUILD_EXTRA_ARGS_BY_PATH",
@@ -45,14 +45,11 @@ https://github.com/bazelbuild/bazel-gazelle/tree/master/internal/bzlmod/default_
 """
 
 # TODO: megahack    
-def from_file_tags_from_go_work(module_ctx, go_work_label):
+def go_work_from_label(module_ctx, go_work_label):
     """Loads deps from a go.work file"""
     go_work_path = module_ctx.path(go_work_label)
     go_work_content = module_ctx.read(go_work_path)
-    go_work = parse_go_work(go_work_content, go_work_label)
-
-    # struct( go_mod = Label("@@//hello:go.mod"), _is_dev_dependency = False)
-    return [struct( go_mod = go_mod, _is_dev_dependency = False) for go_mod in go_work.go_mods]
+    return parse_go_work(go_work_content, go_work_label)
 
 def _fail_on_non_root_overrides(module_ctx, module, tag_class):
     if module.is_root:
@@ -270,7 +267,17 @@ def _go_deps_impl(module_ctx):
                 from_file_tags.append(from_file_tag)
             elif from_file_tag.go_work:
                 # TODO: megahack
-                from_file_tags = from_file_tags + from_file_tags_from_go_work(module_ctx, from_file_tag.go_work)
+                go_work = go_work_from_label(module_ctx, from_file_tag.go_work)
+                additional_module_tags += [
+                    with_replaced_or_new_fields(tag, _is_dev_dependency = False)
+                    for tag in go_work.module_tags
+                ]
+
+                for entry, new_sum in sums_from_go_work(module_ctx, from_file_tag.go_work).items():
+                    _safe_insert_sum(sums, entry, new_sum)
+
+                replace_map.update(go_work.replace_map)
+                from_file_tags = from_file_tags + go_work.from_file_tags
             else:
                 fail("Either \"go_mod\" or \"go_work\" must be specified in \"go_deps.from_file\" tags.")
 

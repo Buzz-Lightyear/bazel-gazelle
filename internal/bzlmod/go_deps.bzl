@@ -453,10 +453,15 @@ def _go_deps_impl(module_ctx):
             # go_deps.
             continue
 
+        gazelle_directives = list(_get_directives(path, gazelle_overrides))
+        if "org_golang_google_grpc" == module.repo_name:
+            gazelle_directives.append("gazelle:resolve go google.golang.org/genproto/googleapis/rpc/status @org_golang_google_genproto//googleapis/rpc/status")
+            print("Adding Gazelle directive {g} for {m}".format(g=gazelle_directives, m=module.repo_name))
+
         go_repository_args = {
             "name": module.repo_name,
             "importpath": path,
-            "build_directives": _get_directives(path, gazelle_overrides),
+            "build_directives": gazelle_directives,
             "build_file_generation": _get_build_file_generation(path, gazelle_overrides),
             "build_extra_args": _get_build_extra_args(path, gazelle_overrides),
             "patches": _get_patches(path, module_overrides),

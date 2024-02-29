@@ -298,6 +298,10 @@ def fail_on_version_conflict(version, previous, module_tag, module_name_to_go_do
         # version is the same, skip because we won't error
         return
 
+    if not hasattr(module_tag, "module_path"):
+        # overrides are not considered for version conflicts
+        return
+
     # When using go.work, duplicate dependency versions are possible.
     # This can cause issues, so we fail with a hopefully actionable error.
     current_label = module_tag._parent_label
@@ -520,10 +524,18 @@ def _go_deps_impl(module_ctx):
             paths[module_tag.path] = struct(version = version, module_tag = module_tag)
 
             if module_tag.path not in module_resolutions or version > module_resolutions[module_tag.path].version:
+                to_path = None
+
+                # TODO handle moduld_tag._module_path
+                if module_tag.path in replace_map:
+                    to_path = replace_map[module_tag.path].to_path
+
                 module_resolutions[module_tag.path] = struct(
                     repo_name = _repo_name(module_tag.path),
                     version = version,
                     raw_version = raw_version,
+                    to_path = to_path,
+                    _module_path = module_tag._module_path,
                 )
 
     _fail_on_unmatched_overrides(archive_overrides.keys(), module_resolutions, "archive_overrides")
@@ -549,6 +561,7 @@ def _go_deps_impl(module_ctx):
                 version = new_version,
                 raw_version = replace.version,
             )
+
             if path in root_versions:
                 if replace != replace.to_path:
                     # If the root module replaces a Go module with a completely different one, do
@@ -598,7 +611,6 @@ def _go_deps_impl(module_ctx):
             # Do not create a go_repository for a dep shared with the non-isolated instance of
             # go_deps.
             continue
-
         go_repository_args = {
             "name": module.repo_name,
             "importpath": path,
@@ -623,6 +635,12 @@ def _go_deps_impl(module_ctx):
                 "sum": _get_sum_from_module(path, module, sums),
                 "replace": getattr(module, "replace", None),
                 "version": "v" + module.raw_version,
+            })
+
+        if module._module_path:
+            go_repository_args.update({
+                "version": None,
+                "path": module._module_path,
             })
 
         go_repository(**go_repository_args)
@@ -670,7 +688,11 @@ def _get_sum_from_module(path, module, sums):
 
     if entry not in sums:
         # TODO: if no sum exist, this is probably because a go mod tidy was missed
-        fail("No sum for {}@{} found. You may need to run: bazel run @rules_go//go -- mod tid".format(path, module.raw_version))
+        if module.raw_version == "999.999.999":
+            return ""
+        else:
+            # TODO: if no sum exist, this is probably because a go mod tidy was missed
+            fail("No sum for {}@{} found. You may need to run: bazel run @rules_go//go -- mod tid".format(path, module.raw_version))
 
     return sums[entry]
 
@@ -711,6 +733,10 @@ _module_tag = tag_class(
         ),
         "build_naming_convention": attr.string(doc = """Removed, do not use""", default = ""),
         "build_file_proto_mode": attr.string(doc = """Removed, do not use""", default = ""),
+        "_module_path": attr.string(
+            doc = """blah blah""",
+            mandatory = False,
+        ),
         "_parent_label": attr.label(
             doc = """The label of the go.mod or go.work file that this module was imported from.""",
             default = Label("//:MODULE.bazel"),

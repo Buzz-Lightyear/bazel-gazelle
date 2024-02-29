@@ -94,7 +94,7 @@ def parse_go_work(content, go_work_label):
     go_mods = [use_spec_to_label(go_work_label.workspace_name, use) for use in state["use"]]
     from_file_tags = [struct(go_mod = go_mod, _is_dev_dependency = False) for go_mod in go_mods]
 
-    module_tags = [struct(version = mod.version, path = mod.to_path, _parent_label = go_work_label, indirect = False) for mod in state["replace"].values()]
+    module_tags = [struct(version = mod.version, path = mod.to_path, _parent_label = go_work_label, _module_path = mod.module_path, indirect = False) for mod in state["replace"].values()]
 
     return struct(
         go = (int(major), int(minor)),
@@ -133,6 +133,7 @@ def deps_from_go_mod(module_ctx, go_mod_label):
             path = require.path,
             version = require.version,
             indirect = require.indirect,
+            _module_path = None,
             _parent_label = go_mod_label,
         ))
 
@@ -241,6 +242,7 @@ def _parse_replace_directive(state, tokens, path, line_no):
         state["replace"][from_path] = struct(
             from_version = None,
             to_path = tokens[2],
+            module_path = None,
             version = _canonicalize_raw_version(tokens[3]),
         )
         # pattern: replace from_path from_version => to_path to_version
@@ -250,12 +252,14 @@ def _parse_replace_directive(state, tokens, path, line_no):
             from_version = _canonicalize_raw_version(tokens[1]),
             to_path = tokens[3],
             version = _canonicalize_raw_version(tokens[4]),
+            module_path = None,
         )
     else:
-        fail(
-            "{}:{}: replace directive must follow pattern: ".format(path, line_no) +
-            "'replace from_path from_version => to_path to_version' or " +
-            "'replace from_path => to_path to_version'",
+        state["replace"][from_path] = struct(
+            from_version = None,
+            to_path = tokens[0],
+            module_path = tokens[2],
+            version = "{",
         )
 
 def _tokenize_line(line, path, line_no):
